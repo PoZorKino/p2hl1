@@ -12,7 +12,7 @@ namespace movement {
 
 namespace {
 
-constexpr int kVtableCopy = 96;
+constexpr int kVtableMax = 256;
 
 constexpr int kTracePlayerBBox = 15;
 constexpr int kFriction = 23;
@@ -369,22 +369,48 @@ bool install(CreateInterfaceFn factory, void *dll) {
 	s.gm = factory("GameMovement001", nullptr);
 	void **portal_vt = rtti::vtable(s.module, ".?AVCPortalGameMovement@@");
 	s.base_vt = rtti::vtable(s.module, ".?AVCGameMovement@@");
-	if (!s.gm || !portal_vt || !s.base_vt || *reinterpret_cast<void ***>(s.gm) != portal_vt) {
-		msg("hl1mov: %s CPortalGameMovement not found\n", s.name);
+	if (!s.gm || !portal_vt || !s.base_vt) {
+		msg("hl1mov: %s lookup failed gm=%p portal=%p base=%p\n", s.name, s.gm, portal_vt, s.base_vt);
 		return false;
 	}
 
-	s.orig_vt = portal_vt;
-	s.hook_vt = new void *[kVtableCopy + 1];
-	std::memcpy(s.hook_vt, portal_vt - 1, sizeof(void *) * (kVtableCopy + 1));
+	void **current = *reinterpret_cast<void ***>(s.gm);
+	if (current != portal_vt) {
+		int same = 0;
+		for (int i = 0; i < 80; ++i) same += current[i] == portal_vt[i];
+		if (same < 40) {
+			msg("hl1mov: %s GameMovement001 vtable %p is not CPortalGameMovement %p\n", s.name, current, portal_vt);
+			return false;
+		}
+		msg("hl1mov: %s movement already hooked by another plugin, chaining\n", s.name);
+	}
+
+	int count = 0;
+	while (count < kVtableMax && current[count]) ++count;
+	if (count <= kSetDuckedEyeOffset) {
+		msg("hl1mov: %s movement vtable too short (%d)\n", s.name, count);
+		return false;
+	}
+
+	s.orig_vt = current;
+	s.hook_vt = new void *[count + 1];
+	std::memcpy(s.hook_vt + 1, current, sizeof(void *) * count);
+	s.hook_vt[0] = portal_vt[-1];
 	fill_hooks<S>(s.hook_vt + 1);
 	*reinterpret_cast<void ***>(s.gm) = s.hook_vt + 1;
 	return true;
 }
 
 void uninstall(Side &s) {
-	if (s.gm && s.orig_vt) *reinterpret_cast<void ***>(s.gm) = s.orig_vt;
-	delete[] s.hook_vt;
+	if (s.gm && s.orig_vt && s.hook_vt) {
+		void **&vt = *reinterpret_cast<void ***>(s.gm);
+		if (vt == s.hook_vt + 1) {
+			vt = s.orig_vt;
+			delete[] s.hook_vt;
+		} else {
+			msg("hl1mov: %s movement vtable was replaced after load, leaving it\n", s.name);
+		}
+	}
 	s.hook_vt = nullptr;
 	s.orig_vt = nullptr;
 	s.gm = nullptr;
