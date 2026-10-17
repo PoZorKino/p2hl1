@@ -7,17 +7,19 @@ namespace {
 constexpr int kGetAllServerClasses = 10;
 constexpr int kGetAllClasses = 8;
 
+constexpr int kSendOffsetMask = 0xFFFF;
+
 int search_send(SendTable *table, const char *prop) {
 	if (!table) return -1;
 	for (int i = 0; i < table->m_nProps; ++i) {
 		auto p = &table->m_pProps[i];
-		if (p->m_pVarName && !std::strcmp(p->m_pVarName, prop)) return p->m_Offset;
+		if (p->m_pVarName && !std::strcmp(p->m_pVarName, prop)) return p->m_Offset & kSendOffsetMask;
 	}
 	for (int i = 0; i < table->m_nProps; ++i) {
 		auto p = &table->m_pProps[i];
 		if (p->m_Type != DPT_DataTable || !p->m_pDataTable) continue;
 		int sub = search_send(p->m_pDataTable, prop);
-		if (sub >= 0) return p->m_Offset + sub;
+		if (sub >= 0) return (p->m_Offset & kSendOffsetMask) + sub;
 	}
 	return -1;
 }
