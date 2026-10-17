@@ -466,7 +466,13 @@ bool init(CreateInterfaceFn engine_factory, CreateInterfaceFn server_factory) {
 
 void frame() {
 	bool want = cvars::get_int(hl1_movement) != 0;
-	if (want != g_applied) apply_game_vars(want);
+	if (want != g_applied) return apply_game_vars(want);
+	if (!want) return;
+	for (auto &gv : g_game_vars) {
+		if (!gv.var) continue;
+		const char *cur = cvars::root(gv.var)->m_pszString;
+		if (!cur || std::strcmp(cur, gv.value)) cvars::set(gv.var, gv.value);
+	}
 }
 
 void shutdown() {
