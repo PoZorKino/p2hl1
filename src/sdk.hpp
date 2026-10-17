@@ -148,7 +148,9 @@ struct alignas(4) Trace {
 	uint16_t dispFlags;
 	bool allsolid;
 	bool startsolid;
-	uint8_t rest[28];
+	uint8_t rest[20];
+	void *ent;
+	int hitbox;
 };
 static_assert(sizeof(Trace) == 84, "trace_t is 84 bytes in Portal 2");
 

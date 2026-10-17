@@ -106,6 +106,8 @@ struct Side {
 	int ground_frames;
 	int edge_frames;
 	int solid_categorize;
+	int null_ground;
+	int stale_ground;
 	int air_standing;
 	int air_ducked;
 	float air_wish_standing;
@@ -346,8 +348,9 @@ void categorize_position(Side &s, void *gm) {
 	Vec3 point{org.x, org.y, org.z - 2.0f};
 	Trace tr;
 	trace_hull(gm, org, point, tr);
-	if (tr.startsolid || tr.allsolid) {
-		++s.solid_categorize;
+	bool no_entity = tr.normal.z >= 0.7f && !tr.ent;
+	if (tr.startsolid || tr.allsolid || no_entity) {
+		++(no_entity ? s.null_ground : s.solid_categorize);
 		Vec3 vel = velocity(gm);
 		orig<VoidFn>(s, kCategorizePosition)(gm);
 		if (!on_ground(s, gm)) velocity(gm) = vel;
@@ -520,6 +523,11 @@ void jump(void *gm, bool buffered) {
 	s.jump_queue = 0;
 
 	set_ground(gm, nullptr);
+	int &flags = field<int>(player(gm), s.flags);
+	if (flags & FL_ONGROUND) {
+		flags &= ~FL_ONGROUND;
+		++s.stale_ground;
+	}
 
 	Vec3 &vel = velocity(gm);
 	if (cvars::get_int(hl1_bhopcap)) {
@@ -872,8 +880,8 @@ void frame() {
 	if (!cvars::get_int(hl1_debug) || ++g_debug_ticks < 60) return;
 	g_debug_ticks = 0;
 	for (auto &s : g_side) {
-		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d stuck=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.solid_categorize, s.speed, s.globals ? frametime(s) : -1.0f);
-		s.solid_categorize = 0;
+		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d stuck=%d noent=%d stale=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.solid_categorize, s.null_ground, s.stale_ground, s.speed, s.globals ? frametime(s) : -1.0f);
+		s.solid_categorize = s.null_ground = s.stale_ground = 0;
 		msg("hl1mov: %s air standing=%d wish=%.0f ducked=%d wish=%.0f\n", s.name, s.air_standing, s.air_standing ? s.air_wish_standing / s.air_standing : 0.0f, s.air_ducked, s.air_ducked ? s.air_wish_ducked / s.air_ducked : 0.0f);
 		s.hl1_moves = s.portal_moves = s.jumps = s.ground_frames = s.edge_frames = 0;
 		s.air_standing = s.air_ducked = 0;
