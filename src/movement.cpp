@@ -102,6 +102,8 @@ struct Side {
 	int yaw_span;
 	int yaw_ticks;
 	bool yaw_init;
+	int jump_queue;
+	int prev_buttons;
 	int hl1_moves;
 	int portal_moves;
 	int jumps;
@@ -120,6 +122,7 @@ ConVar *hl1_maxspeed;
 ConVar *hl1_inputspeed;
 ConVar *hl1_debug;
 ConVar *hl1_fps;
+ConVar *hl1_jumpbuffer;
 
 ConVar *cl_forwardspeed;
 ConVar *cl_backspeed;
@@ -478,16 +481,17 @@ void air_move(const Side &s, void *gm, const Vec3 &basevel) {
 }
 
 template <int S>
-void jump(void *gm) {
+void jump(void *gm, bool buffered) {
 	Side &s = g_side[S];
 	void *mv = move(gm);
 	int &old = field<int>(mv, kMvOldButtons);
 
 	if (!on_ground(s, gm)) {
-		old |= IN_JUMP;
+		if (!buffered) old |= IN_JUMP;
 		return;
 	}
-	if (old & IN_JUMP) return;
+	if (!buffered && (old & IN_JUMP)) return;
+	s.jump_queue = 0;
 
 	set_ground(gm, nullptr);
 
@@ -525,6 +529,10 @@ void __fastcall hk_full_walk_move(void *gm, void *) {
 	float &yaw = field<Vec3>(mv, kMvViewAngles).y;
 	float cmd_yaw = yaw;
 
+	int buttons = field<int>(mv, kMvButtons);
+	if ((buttons & IN_JUMP) && !(s.prev_buttons & IN_JUMP)) s.jump_queue = cvars::get_int(hl1_jumpbuffer) + 1;
+	s.prev_buttons = buttons;
+
 	int steps = 1;
 	float fps = cvars::get_float(hl1_fps);
 	if (fps > 0.0f && tick_ft > 0.0f) {
@@ -558,6 +566,7 @@ void __fastcall hk_full_walk_move(void *gm, void *) {
 	}
 	globals_ft = tick_ft;
 	yaw = cmd_yaw;
+	if (s.jump_queue > 0) --s.jump_queue;
 
 	vfunc<VoidFn>(gm, kCheckFalling)(gm);
 
@@ -573,8 +582,10 @@ void hl1_step(void *gm) {
 
 	add_correct_gravity(s, gm);
 
-	if (field<int>(mv, kMvButtons) & IN_JUMP)
-		jump<S>(gm);
+	if (s.jump_queue > 0 && on_ground(s, gm))
+		jump<S>(gm, true);
+	else if (field<int>(mv, kMvButtons) & IN_JUMP)
+		jump<S>(gm, false);
 	else
 		field<int>(mv, kMvOldButtons) &= ~IN_JUMP;
 
@@ -795,6 +806,7 @@ bool init(CreateInterfaceFn engine_factory, CreateInterfaceFn server_factory) {
 	hl1_maxspeed = cvars::create("hl1_maxspeed", "320", "Player max speed.", true, 0);
 	hl1_inputspeed = cvars::create("hl1_inputspeed", "400", "Movement key speed (cl_forwardspeed/sidespeed/backspeed in HL1), 0 keeps Portal 2's.", true, 0);
 	hl1_debug = cvars::create("hl1_debug", "0", "Print movement stats once a second.", true, 0, true, 1);
+	hl1_jumpbuffer = cvars::create("hl1_jumpbuffer", "2", "Ticks a jump press is remembered before landing. Portal 2 only delivers input every 2 ticks. 0 is strict HL1.", true, 0, true, 8);
 	hl1_fps = cvars::create("hl1_fps", "100", "HL1 frame rate to simulate: each tick is split into frames with interpolated view yaw. 0 runs one frame per tick.", true, 0, true, 1000);
 
 	cl_forwardspeed = cvars::find("cl_forwardspeed");
