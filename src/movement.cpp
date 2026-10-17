@@ -103,6 +103,8 @@ struct Side {
 	int yaw_ticks;
 	bool yaw_init;
 	int jump_queue;
+	int ground_frames;
+	int edge_frames;
 	int prev_buttons;
 	int hl1_moves;
 	int portal_moves;
@@ -386,7 +388,8 @@ void air_accelerate(const Side &s, void *gm, const Vec3 &wishdir, float wishspee
 	vel = vel + wishdir * accelspeed;
 }
 
-void friction(const Side &s, void *gm) {
+void friction(Side &s, void *gm) {
+	++s.ground_frames;
 	if (field<float>(player(gm), s.water_jump_time) != 0.0f) return;
 	Vec3 &vel = velocity(gm);
 	float speed = length(vel);
@@ -394,13 +397,17 @@ void friction(const Side &s, void *gm) {
 
 	const Vec3 &org = origin(gm);
 	float half = field<bool>(player(gm), s.ducked) ? kDuckOffset : kDuckOffset * 2.0f;
-	Vec3 start{org.x + vel.x / speed * 16.0f, org.y + vel.y / speed * 16.0f, org.z - half};
-	Vec3 stop{start.x, start.y, start.z - 34.0f};
+	Vec3 start{org.x + vel.x / speed * 16.0f, org.y + vel.y / speed * 16.0f, org.z};
+	Vec3 stop{start.x, start.y, org.z - half - 34.0f};
 	Trace tr;
 	trace_hull(gm, start, stop, tr);
 
 	float fric = kFriction;
-	if (tr.fraction == 1.0f && !tr.startsolid) fric *= cvars::get_float(hl1_edgefriction);
+	bool edge = tr.fraction == 1.0f && !tr.startsolid && !tr.allsolid;
+	if (edge) {
+		fric *= cvars::get_float(hl1_edgefriction);
+		++s.edge_frames;
+	}
 
 	float control = speed < kStopSpeed ? kStopSpeed : speed;
 	float newspeed = speed - control * fric * frametime(s);
@@ -830,8 +837,8 @@ void frame() {
 	if (!cvars::get_int(hl1_debug) || ++g_debug_ticks < 60) return;
 	g_debug_ticks = 0;
 	for (auto &s : g_side) {
-		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.speed, s.globals ? frametime(s) : -1.0f);
-		s.hl1_moves = s.portal_moves = s.jumps = 0;
+		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.speed, s.globals ? frametime(s) : -1.0f);
+		s.hl1_moves = s.portal_moves = s.jumps = s.ground_frames = s.edge_frames = 0;
 	}
 }
 
