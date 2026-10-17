@@ -105,6 +105,7 @@ struct Side {
 	int jump_queue;
 	int ground_frames;
 	int edge_frames;
+	int solid_categorize;
 	int air_standing;
 	int air_ducked;
 	float air_wish_standing;
@@ -335,7 +336,7 @@ void fixup_gravity_velocity(const Side &s, void *gm) {
 	gravity_difference(s, gm);
 }
 
-void categorize_position(const Side &s, void *gm) {
+void categorize_position(Side &s, void *gm) {
 	vfunc<BoolFn>(gm, kCheckWater)(gm);
 	Vec3 &org = origin(gm);
 	if (velocity(gm).z > kGroundMaxUpSpeed) {
@@ -345,6 +346,13 @@ void categorize_position(const Side &s, void *gm) {
 	Vec3 point{org.x, org.y, org.z - 2.0f};
 	Trace tr;
 	trace_hull(gm, org, point, tr);
+	if (tr.startsolid || tr.allsolid) {
+		++s.solid_categorize;
+		Vec3 vel = velocity(gm);
+		orig<VoidFn>(s, kCategorizePosition)(gm);
+		if (!on_ground(s, gm)) velocity(gm) = vel;
+		return;
+	}
 	if (tr.normal.z < 0.7f) {
 		set_ground(gm, nullptr);
 		return;
@@ -864,7 +872,8 @@ void frame() {
 	if (!cvars::get_int(hl1_debug) || ++g_debug_ticks < 60) return;
 	g_debug_ticks = 0;
 	for (auto &s : g_side) {
-		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.speed, s.globals ? frametime(s) : -1.0f);
+		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d stuck=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.solid_categorize, s.speed, s.globals ? frametime(s) : -1.0f);
+		s.solid_categorize = 0;
 		msg("hl1mov: %s air standing=%d wish=%.0f ducked=%d wish=%.0f\n", s.name, s.air_standing, s.air_standing ? s.air_wish_standing / s.air_standing : 0.0f, s.air_ducked, s.air_ducked ? s.air_wish_ducked / s.air_ducked : 0.0f);
 		s.hl1_moves = s.portal_moves = s.jumps = s.ground_frames = s.edge_frames = 0;
 		s.air_standing = s.air_ducked = 0;
