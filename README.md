@@ -6,7 +6,8 @@ The walk and air movement is a port of `PM_PlayerMove` from the Half-Life SDK
 (`pm_shared.c`): 800 gravity, 320 max speed, 10 accelerate / airaccelerate,
 the 30 u/s air speed cap, edge friction, HL1 jump, duck and ducktap, stair
 stepping and ground checks. Portal 2 still handles collision, portals, water,
-tractor beams and wall gel.
+tractor beams and wall gel. Catapult and other launch flights use the game's gravity
+so you still land on the target.
 
 ## Install
 

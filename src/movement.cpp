@@ -67,6 +67,8 @@ constexpr int kDuckFinishMs = 600;
 constexpr float kDuckSpeed = 0.333f;
 constexpr int kMaxSubsteps = 20;
 constexpr float kYawSnap = 60.0f;
+constexpr float kLaunchDelta = 100.0f;
+constexpr float kTeleportDistance = 64.0f;
 
 using VoidFn = void(__thiscall *)(void *);
 using BoolFn = bool(__thiscall *)(void *);
@@ -92,6 +94,8 @@ struct Side {
 	int water_level;
 	int base_velocity;
 	int tractor_beam;
+	int air_control;
+	float last_air_control;
 	int water_jump_time;
 	int ent_gravity;
 	void **globals;
@@ -116,6 +120,11 @@ struct Side {
 	int hl1_moves;
 	int portal_moves;
 	int jumps;
+	int launches;
+	bool launched;
+	bool have_last;
+	Vec3 last_vel;
+	Vec3 last_org;
 	float speed;
 };
 
@@ -322,6 +331,7 @@ float spline(float value, float scale) {
 }
 
 void gravity_difference(const Side &s, void *gm) {
+	if (s.launched) return;
 	float ent = field<float>(player(gm), s.ent_gravity);
 	if (ent == 0.0f) ent = 1.0f;
 	float game = field<float>(*s.gravity_var, kConVarFloat);
@@ -545,6 +555,26 @@ void jump(void *gm, bool buffered) {
 template <int S>
 void hl1_step(void *gm);
 
+void launch(Side &s, void *gm) {
+	s.launched = true;
+	++s.launches;
+	if (velocity(gm).z > kGroundMaxUpSpeed) set_ground(gm, nullptr);
+}
+
+void detect_launch(Side &s, void *gm) {
+	if (s.air_control > 0) {
+		float t = field<float>(player(gm), s.air_control);
+		if (t > s.last_air_control) launch(s, gm);
+		s.last_air_control = t;
+		return;
+	}
+	if (!s.have_last) return;
+	Vec3 vel = velocity(gm);
+	if (length(origin(gm) - s.last_org) > kTeleportDistance) return;
+	if (length(vel - s.last_vel) < kLaunchDelta) return;
+	launch(s, gm);
+}
+
 template <int S>
 void __fastcall hk_full_walk_move(void *gm, void *) {
 	Side &s = g_side[S];
@@ -554,11 +584,14 @@ void __fastcall hk_full_walk_move(void *gm, void *) {
 		(s.tractor_beam > 0 && field<uint32_t>(pl, s.tractor_beam) != 0xFFFFFFFFu);
 	if (portal) {
 		++s.portal_moves;
+		s.have_last = false;
+		s.launched = false;
 		return call(gm);
 	}
 
 	++s.hl1_moves;
 	void *mv = move(gm);
+	detect_launch(s, gm);
 	float &globals_ft = field<float>(*s.globals, kGlobalsFrametime);
 	float tick_ft = globals_ft;
 	float &yaw = field<Vec3>(mv, kMvViewAngles).y;
@@ -604,6 +637,11 @@ void __fastcall hk_full_walk_move(void *gm, void *) {
 	if (s.jump_queue > 0) --s.jump_queue;
 
 	vfunc<VoidFn>(gm, kCheckFalling)(gm);
+
+	if (on_ground(s, gm)) s.launched = false;
+	s.last_vel = velocity(gm);
+	s.last_org = origin(gm);
+	s.have_last = true;
 
 	const Vec3 &vel = velocity(gm);
 	s.speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
@@ -781,7 +819,8 @@ bool resolve_props(Side &s, void *dll) {
 	s.water_level = get("m_nWaterLevel");
 	s.base_velocity = get("m_vecBaseVelocity");
 	s.tractor_beam = get("m_hTractorBeam");
-	msg("hl1mov: %s props flags=%d local=%d ducked=%d ducking=%d ducktime=%d water=%d basevel=%d tbeam=%d\n", s.name, s.flags, s.local, s.ducked, s.ducking, s.duck_time, s.water_level, s.base_velocity, s.tractor_beam);
+	s.air_control = get("m_flAirControlSupressionTime");
+	msg("hl1mov: %s props flags=%d local=%d ducked=%d ducking=%d ducktime=%d water=%d basevel=%d tbeam=%d aircontrol=%d\n", s.name, s.flags, s.local, s.ducked, s.ducking, s.duck_time, s.water_level, s.base_velocity, s.tractor_beam, s.air_control);
 	return s.flags > 0 && s.local > 0 && s.ducked > 0 && s.ducking > 0 && s.duck_time > 0 && s.water_level > 0 && s.base_velocity > 0;
 }
 
@@ -887,8 +926,8 @@ void frame() {
 	if (!cvars::get_int(hl1_debug) || ++g_debug_ticks < 60) return;
 	g_debug_ticks = 0;
 	for (auto &s : g_side) {
-		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d stuck=%d noent=%d stale=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.solid_categorize, s.null_ground, s.stale_ground, s.speed, s.globals ? frametime(s) : -1.0f);
-		s.solid_categorize = s.null_ground = s.stale_ground = 0;
+		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d stuck=%d noent=%d stale=%d launches=%d launched=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.solid_categorize, s.null_ground, s.stale_ground, s.launches, s.launched, s.speed, s.globals ? frametime(s) : -1.0f);
+		s.solid_categorize = s.null_ground = s.stale_ground = s.launches = 0;
 		msg("hl1mov: %s air standing=%d wish=%.0f ducked=%d wish=%.0f\n", s.name, s.air_standing, s.air_standing ? s.air_wish_standing / s.air_standing : 0.0f, s.air_ducked, s.air_ducked ? s.air_wish_ducked / s.air_ducked : 0.0f);
 		s.hl1_moves = s.portal_moves = s.jumps = s.ground_frames = s.edge_frames = 0;
 		s.air_standing = s.air_ducked = 0;
