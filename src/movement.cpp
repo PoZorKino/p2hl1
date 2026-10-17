@@ -65,6 +65,8 @@ constexpr float kDuckOffset = 18.0f;
 constexpr int kDuckTimeMs = 1000;
 constexpr int kDuckFinishMs = 600;
 constexpr float kDuckSpeed = 0.333f;
+constexpr int kMaxSubsteps = 20;
+constexpr float kYawSnap = 60.0f;
 
 using VoidFn = void(__thiscall *)(void *);
 using BoolFn = bool(__thiscall *)(void *);
@@ -94,6 +96,12 @@ struct Side {
 	int ent_gravity;
 	void **globals;
 	ConVar **gravity_var;
+	float yaw_from;
+	float yaw_to;
+	float yaw_progress;
+	int yaw_span;
+	int yaw_ticks;
+	bool yaw_init;
 	int hl1_moves;
 	int portal_moves;
 	int jumps;
@@ -111,6 +119,7 @@ ConVar *hl1_bhopcap;
 ConVar *hl1_maxspeed;
 ConVar *hl1_inputspeed;
 ConVar *hl1_debug;
+ConVar *hl1_fps;
 
 ConVar *cl_forwardspeed;
 ConVar *cl_backspeed;
@@ -136,6 +145,13 @@ float dot(const Vec3 &a, const Vec3 &b) {
 
 float length(const Vec3 &v) {
 	return std::sqrt(dot(v, v));
+}
+
+float angle_diff(float from, float to) {
+	float d = std::fmod(to - from, 360.0f);
+	if (d > 180.0f) d -= 360.0f;
+	if (d < -180.0f) d += 360.0f;
+	return d;
 }
 
 float normalize(Vec3 &v) {
@@ -488,6 +504,9 @@ void jump(void *gm) {
 }
 
 template <int S>
+void hl1_step(void *gm);
+
+template <int S>
 void __fastcall hk_full_walk_move(void *gm, void *) {
 	Side &s = g_side[S];
 	auto call = orig<VoidFn>(s, kFullWalkMove);
@@ -500,6 +519,56 @@ void __fastcall hk_full_walk_move(void *gm, void *) {
 	}
 
 	++s.hl1_moves;
+	void *mv = move(gm);
+	float &globals_ft = field<float>(*s.globals, kGlobalsFrametime);
+	float tick_ft = globals_ft;
+	float &yaw = field<Vec3>(mv, kMvViewAngles).y;
+	float cmd_yaw = yaw;
+
+	int steps = 1;
+	float fps = cvars::get_float(hl1_fps);
+	if (fps > 0.0f && tick_ft > 0.0f) {
+		steps = static_cast<int>(fps * tick_ft + 0.5f);
+		if (steps < 1) steps = 1;
+		if (steps > kMaxSubsteps) steps = kMaxSubsteps;
+	}
+
+	if (!s.yaw_init || angle_diff(s.yaw_to, cmd_yaw) != 0.0f) {
+		float cur = s.yaw_from + angle_diff(s.yaw_from, s.yaw_to) * s.yaw_progress;
+		if (!s.yaw_init || std::fabs(angle_diff(cur, cmd_yaw)) > kYawSnap) cur = cmd_yaw;
+		s.yaw_span = s.yaw_ticks < 1 ? 1 : (s.yaw_ticks > 2 ? 2 : s.yaw_ticks);
+		s.yaw_from = cur;
+		s.yaw_to = cmd_yaw;
+		s.yaw_progress = 0.0f;
+		s.yaw_ticks = 0;
+		s.yaw_init = true;
+	}
+	++s.yaw_ticks;
+
+	globals_ft = tick_ft / steps;
+	for (int i = 0; i < steps; ++i) {
+		if (steps > 1) {
+			s.yaw_progress += 1.0f / (s.yaw_span * steps);
+			if (s.yaw_progress > 1.0f) s.yaw_progress = 1.0f;
+			yaw = s.yaw_from + angle_diff(s.yaw_from, s.yaw_to) * s.yaw_progress;
+		} else {
+			s.yaw_progress = 1.0f;
+		}
+		hl1_step<S>(gm);
+	}
+	globals_ft = tick_ft;
+	yaw = cmd_yaw;
+
+	vfunc<VoidFn>(gm, kCheckFalling)(gm);
+
+	const Vec3 &vel = velocity(gm);
+	s.speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
+}
+
+template <int S>
+void hl1_step(void *gm) {
+	Side &s = g_side[S];
+	void *pl = player(gm);
 	void *mv = move(gm);
 
 	add_correct_gravity(s, gm);
@@ -525,11 +594,6 @@ void __fastcall hk_full_walk_move(void *gm, void *) {
 
 	if (field<uint8_t>(pl, s.water_level) < 2) fixup_gravity_velocity(s, gm);
 	if (on_ground(s, gm)) velocity(gm).z = 0.0f;
-
-	vfunc<VoidFn>(gm, kCheckFalling)(gm);
-
-	const Vec3 &vel = velocity(gm);
-	s.speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
 }
 
 template <int S>
@@ -731,6 +795,7 @@ bool init(CreateInterfaceFn engine_factory, CreateInterfaceFn server_factory) {
 	hl1_maxspeed = cvars::create("hl1_maxspeed", "320", "Player max speed.", true, 0);
 	hl1_inputspeed = cvars::create("hl1_inputspeed", "400", "Movement key speed (cl_forwardspeed/sidespeed/backspeed in HL1), 0 keeps Portal 2's.", true, 0);
 	hl1_debug = cvars::create("hl1_debug", "0", "Print movement stats once a second.", true, 0, true, 1);
+	hl1_fps = cvars::create("hl1_fps", "100", "HL1 frame rate to simulate: each tick is split into frames with interpolated view yaw. 0 runs one frame per tick.", true, 0, true, 1000);
 
 	cl_forwardspeed = cvars::find("cl_forwardspeed");
 	cl_backspeed = cvars::find("cl_backspeed");
