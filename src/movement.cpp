@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <cmath>
+#include <vector>
 
 namespace movement {
 
@@ -18,7 +19,10 @@ constexpr int kTracePlayerBBox = 15;
 constexpr int kFriction = 23;
 constexpr int kAirAccelerate = 24;
 constexpr int kAirMove = 25;
+constexpr int kAccelerate = 27;
 constexpr int kStayOnGround = 29;
+constexpr int kStartGravity = 33;
+constexpr int kFinishGravity = 34;
 constexpr int kCheckJumpButton = 36;
 constexpr int kCategorizePosition = 50;
 constexpr int kCheckParameters = 51;
@@ -39,8 +43,22 @@ constexpr int kMvUp = 52;
 constexpr int kMvMaxSpeed = 56;
 constexpr int kMvClientMaxSpeed = 60;
 constexpr int kMvVelocity = 64;
+constexpr int kMvOutWishVel = 104;
 constexpr int kMvOrigin = 156;
 
+constexpr int kGlobalsFrametime = 16;
+constexpr int kGlobalsMaxClients = 20;
+constexpr int kGlobalsTickInterval = 28;
+constexpr int kConVarName = 12;
+constexpr int kConVarFloat = 44;
+
+constexpr float kGravity = 800.0f;
+constexpr float kAccel = 10.0f;
+constexpr float kAirAccel = 10.0f;
+constexpr float kFrictionValue = 4.0f;
+constexpr float kStopSpeed = 100.0f;
+constexpr float kMaxSpeed = 320.0f;
+constexpr float kEdgeFriction = 2.0f;
 constexpr float kJumpSpeed = 268.3281573f;
 constexpr float kDuckOffset = 18.0f;
 constexpr int kDuckTimeMs = 1000;
@@ -67,6 +85,17 @@ struct Side {
 	int ducked;
 	int ducking;
 	int duck_time;
+	int water_jump_time;
+	int ent_gravity;
+	int surface_friction;
+	void **globals;
+	ConVar **gravity_var;
+	ConVar **accelerate_var;
+	int air_hl1;
+	int air_portal;
+	int jumps;
+	float gravity_z;
+	float air_speed;
 };
 
 Side g_side[2] = {
@@ -80,29 +109,105 @@ ConVar *hl1_bhopcap;
 ConVar *hl1_maxspeed;
 ConVar *hl1_inputspeed;
 ConVar *hl1_stayonground;
+ConVar *hl1_debug;
 
-ConVar *sv_friction;
 ConVar *cl_forwardspeed;
 ConVar *cl_backspeed;
 ConVar *cl_sidespeed;
 
-struct GameVar {
-	const char *name;
-	const char *value;
-	ConVar *var;
-	char saved[64];
+int g_debug_ticks;
+
+bool readable(const void *p, size_t len) {
+	MEMORY_BASIC_INFORMATION mbi;
+	if (!p || !VirtualQuery(p, &mbi, sizeof(mbi))) return false;
+	if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+	auto end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+	return reinterpret_cast<uintptr_t>(p) + len <= end;
+}
+
+struct Code {
+	std::vector<int> load_disps;
+	std::vector<int> mul_disps;
+	std::vector<void **> abs_vars;
 };
 
-GameVar g_game_vars[] = {
-	{"sv_gravity", "800"},
-	{"sv_accelerate", "10"},
-	{"sv_airaccelerate", "10"},
-	{"sv_friction", "4"},
-	{"sv_stopspeed", "100"},
-	{"sv_maxspeed", "320"},
-};
+Code scan_code(const uint8_t *fn, int len) {
+	Code c;
+	for (int i = 0; i + 6 <= len; ++i) {
+		const uint8_t *p = fn + i;
+		if (p[0] == 0xF3 && p[1] == 0x0F && (p[2] == 0x10 || p[2] == 0x59) && i + 8 <= len) {
+			uint8_t modrm = p[3];
+			if ((modrm >> 6) == 2 && (modrm & 7) != 4) {
+				int disp = *reinterpret_cast<const int *>(p + 4);
+				(p[2] == 0x10 ? c.load_disps : c.mul_disps).push_back(disp);
+				i += 7;
+				continue;
+			}
+		}
+		if (p[0] == 0xA1) {
+			c.abs_vars.push_back(*reinterpret_cast<void **const *>(p + 1));
+			i += 4;
+			continue;
+		}
+		if (p[0] == 0x8B && (p[1] & 0xC7) == 0x05) {
+			c.abs_vars.push_back(*reinterpret_cast<void **const *>(p + 2));
+			i += 5;
+			continue;
+		}
+	}
+	return c;
+}
 
-bool g_applied;
+bool is_convar(void *ptr, const char *name) {
+	if (!readable(ptr, kConVarFloat + 4)) return false;
+	auto str = field<const char *>(ptr, kConVarName);
+	return readable(str, std::strlen(name) + 1) && !std::strcmp(str, name);
+}
+
+bool is_globals(void *ptr) {
+	if (!readable(ptr, 64)) return false;
+	float tick = field<float>(ptr, kGlobalsTickInterval);
+	int clients = field<int>(ptr, kGlobalsMaxClients);
+	return tick > 0.001f && tick < 0.1f && clients >= 1 && clients <= 256;
+}
+
+bool resolve_code(Side &s, void **portal_vt) {
+	auto finish = reinterpret_cast<const uint8_t *>(portal_vt[kFinishGravity]);
+	auto accel = reinterpret_cast<const uint8_t *>(s.base_vt[kAirAccelerate]);
+	auto walk = reinterpret_cast<const uint8_t *>(portal_vt[28]);
+	if (!readable(finish, 200) || !readable(accel, 250) || !readable(walk, 3000)) return false;
+
+	Code fc = scan_code(finish, 200);
+	if (fc.load_disps.size() >= 2) {
+		s.water_jump_time = fc.load_disps[0];
+		s.ent_gravity = fc.load_disps[1];
+	}
+	for (auto var : fc.abs_vars) {
+		if (!readable(var, 4)) continue;
+		void *ptr = *var;
+		if (is_convar(ptr, "sv_gravity")) s.gravity_var = reinterpret_cast<ConVar **>(var);
+		else if (is_globals(ptr)) s.globals = var;
+	}
+
+	Code ac = scan_code(accel, 250);
+	for (int disp : ac.mul_disps) {
+		if (disp > 1000 && disp < 20000) {
+			s.surface_friction = disp;
+			break;
+		}
+	}
+
+	Code wc = scan_code(walk, 3000);
+	for (auto var : wc.abs_vars) {
+		if (readable(var, 4) && is_convar(*var, "sv_accelerate")) {
+			s.accelerate_var = reinterpret_cast<ConVar **>(var);
+			break;
+		}
+	}
+
+	msg("hl1mov: %s code waterjump=%d gravity=%d surface=%d globals=%p sv_gravity=%p sv_accelerate=%p\n", s.name, s.water_jump_time, s.ent_gravity, s.surface_friction, s.globals, s.gravity_var, s.accelerate_var);
+	return s.water_jump_time > 0 && s.ent_gravity > 0 && s.surface_friction > 0 && s.globals && s.gravity_var && s.accelerate_var;
+}
 
 template <typename T>
 T orig(const Side &s, int slot) {
@@ -120,6 +225,18 @@ void *player(void *gm) {
 
 void *move(void *gm) {
 	return field<void *>(gm, kMove);
+}
+
+float frametime(const Side &s) {
+	return field<float>(*s.globals, kGlobalsFrametime);
+}
+
+float game_gravity(const Side &s) {
+	return field<float>(*s.gravity_var, kConVarFloat);
+}
+
+float game_accelerate(const Side &s) {
+	return field<float>(*s.accelerate_var, kConVarFloat);
 }
 
 bool active(void *gm) {
@@ -150,48 +267,104 @@ float spline(float value, float scale) {
 	return 3.0f * sq - 2.0f * sq * value;
 }
 
-template <int S>
-void __fastcall hk_friction(void *gm, void *) {
-	const Side &s = g_side[S];
-	auto call = orig<VoidFn>(s, kFriction);
-	float edge = cvars::get_float(hl1_edgefriction);
-	if (!active(gm) || !sv_friction || edge == 1.0f) return call(gm);
+float length(const Vec3 &v) {
+	return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
 
+void add_gravity_difference(const Side &s, void *gm) {
 	void *pl = player(gm);
-	void *mv = move(gm);
-	if (!(field<int>(pl, s.flags) & FL_ONGROUND)) return call(gm);
+	float ent = field<float>(pl, s.ent_gravity);
+	if (ent == 0.0f) ent = 1.0f;
+	float extra = (kGravity - game_gravity(s)) * ent * 0.5f * frametime(s);
+	field<Vec3>(move(gm), kMvVelocity).z -= extra;
+}
 
-	const Vec3 &vel = field<Vec3>(mv, kMvVelocity);
-	float speed = std::sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
-	if (speed < 0.1f) return call(gm);
+template <int S>
+void __fastcall hk_start_gravity(void *gm, void *) {
+	const Side &s = g_side[S];
+	orig<VoidFn>(s, kStartGravity)(gm);
+	if (active(gm)) add_gravity_difference(s, gm);
+}
 
-	const Vec3 &org = field<Vec3>(mv, kMvOrigin);
+template <int S>
+void __fastcall hk_finish_gravity(void *gm, void *) {
+	const Side &s = g_side[S];
+	orig<VoidFn>(s, kFinishGravity)(gm);
+	if (active(gm) && field<float>(player(gm), s.water_jump_time) == 0.0f) add_gravity_difference(s, gm);
+}
+
+bool over_edge(const Side &s, void *gm, const Vec3 &vel, float speed) {
+	void *pl = player(gm);
+	const Vec3 &org = field<Vec3>(move(gm), kMvOrigin);
 	float half = field<bool>(pl, s.ducked) ? kDuckOffset : kDuckOffset * 2.0f;
 	Vec3 start{org.x + vel.x / speed * 16.0f, org.y + vel.y / speed * 16.0f, org.z - half};
 	Vec3 stop{start.x, start.y, start.z - 34.0f};
 	Trace tr;
 	trace_hull(gm, start, stop, tr);
-	if (tr.fraction < 1.0f || tr.startsolid) return call(gm);
+	return tr.fraction == 1.0f && !tr.startsolid;
+}
 
-	ConVar *fr = cvars::root(sv_friction);
-	float saved = fr->m_fValue;
-	fr->m_fValue = saved * edge;
-	call(gm);
-	fr->m_fValue = saved;
+template <int S>
+void __fastcall hk_friction(void *gm, void *) {
+	const Side &s = g_side[S];
+	if (!active(gm)) return orig<VoidFn>(s, kFriction)(gm);
+
+	void *pl = player(gm);
+	void *mv = move(gm);
+	if (field<float>(pl, s.water_jump_time) != 0.0f) return;
+
+	Vec3 &vel = field<Vec3>(mv, kMvVelocity);
+	float speed = length(vel);
+	if (speed < 0.1f) return;
+
+	float friction = kFrictionValue * field<float>(pl, s.surface_friction);
+	if (field<int>(pl, s.flags) & FL_ONGROUND) {
+		float edge = cvars::get_float(hl1_edgefriction);
+		if (edge != 1.0f && over_edge(s, gm, vel, speed)) friction *= edge;
+	}
+
+	float control = speed < kStopSpeed ? kStopSpeed : speed;
+	float drop = control * friction * frametime(s);
+	float newspeed = speed - drop;
+	if (newspeed < 0.0f) newspeed = 0.0f;
+	if (newspeed == speed) return;
+	newspeed /= speed;
+
+	Vec3 &wish = field<Vec3>(mv, kMvOutWishVel);
+	wish.x -= (1.0f - newspeed) * vel.x;
+	wish.y -= (1.0f - newspeed) * vel.y;
+	wish.z -= (1.0f - newspeed) * vel.z;
+	vel.x *= newspeed;
+	vel.y *= newspeed;
+	vel.z *= newspeed;
+}
+
+template <int S>
+void __fastcall hk_accelerate(void *gm, void *, Vec3 &wishdir, float wishspeed, float accel) {
+	const Side &s = g_side[S];
+	if (active(gm) && accel == game_accelerate(s)) accel = kAccel;
+	orig<AccelFn>(s, kAccelerate)(gm, wishdir, wishspeed, accel);
 }
 
 template <int S>
 void __fastcall hk_air_accelerate(void *gm, void *, Vec3 &wishdir, float wishspeed, float accel) {
 	const Side &s = g_side[S];
-	auto call = active(gm) ? base<AccelFn>(s, kAirAccelerate) : orig<AccelFn>(s, kAirAccelerate);
-	call(gm, wishdir, wishspeed, accel);
+	if (!active(gm)) return orig<AccelFn>(s, kAirAccelerate)(gm, wishdir, wishspeed, accel);
+	base<AccelFn>(s, kAirAccelerate)(gm, wishdir, wishspeed, kAirAccel);
 }
 
 template <int S>
 void __fastcall hk_air_move(void *gm, void *) {
-	const Side &s = g_side[S];
-	auto call = active(gm) ? base<VoidFn>(s, kAirMove) : orig<VoidFn>(s, kAirMove);
+	Side &s = g_side[S];
+	bool on = active(gm);
+	++(on ? s.air_hl1 : s.air_portal);
+	s.gravity_z = field<Vec3>(gm, kGravityDir).z;
+	auto call = on ? base<VoidFn>(s, kAirMove) : orig<VoidFn>(s, kAirMove);
 	call(gm);
+	if (move(gm)) {
+		const Vec3 &vel = field<Vec3>(move(gm), kMvVelocity);
+		s.air_speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
+	}
 }
 
 template <int S>
@@ -226,7 +399,7 @@ void __fastcall hk_check_parameters(void *gm, void *) {
 
 template <int S>
 bool __fastcall hk_check_jump_button(void *gm, void *) {
-	const Side &s = g_side[S];
+	Side &s = g_side[S];
 	auto call = orig<BoolFn>(s, kCheckJumpButton);
 	if (!active(gm)) return call(gm);
 
@@ -240,6 +413,7 @@ bool __fastcall hk_check_jump_button(void *gm, void *) {
 	bool jumped = call(gm);
 	if (ducking) flags |= FL_DUCKING;
 	if (!jumped) return false;
+	++s.jumps;
 
 	Vec3 &vel = field<Vec3>(mv, kMvVelocity);
 	if (vel.z - before.z > kJumpSpeed * 1.5f) return true;
@@ -333,7 +507,10 @@ void fill_hooks(void **vt) {
 	vt[kFriction] = reinterpret_cast<void *>(&hk_friction<S>);
 	vt[kAirAccelerate] = reinterpret_cast<void *>(&hk_air_accelerate<S>);
 	vt[kAirMove] = reinterpret_cast<void *>(&hk_air_move<S>);
+	vt[kAccelerate] = reinterpret_cast<void *>(&hk_accelerate<S>);
 	vt[kStayOnGround] = reinterpret_cast<void *>(&hk_stay_on_ground<S>);
+	vt[kStartGravity] = reinterpret_cast<void *>(&hk_start_gravity<S>);
+	vt[kFinishGravity] = reinterpret_cast<void *>(&hk_finish_gravity<S>);
 	vt[kCheckJumpButton] = reinterpret_cast<void *>(&hk_check_jump_button<S>);
 	vt[kCheckParameters] = reinterpret_cast<void *>(&hk_check_parameters<S>);
 	vt[kDuck] = reinterpret_cast<void *>(&hk_duck<S>);
@@ -371,6 +548,10 @@ bool install(CreateInterfaceFn factory, void *dll) {
 	s.base_vt = rtti::vtable(s.module, ".?AVCGameMovement@@");
 	if (!s.gm || !portal_vt || !s.base_vt) {
 		msg("hl1mov: %s lookup failed gm=%p portal=%p base=%p\n", s.name, s.gm, portal_vt, s.base_vt);
+		return false;
+	}
+	if (!resolve_code(s, portal_vt)) {
+		msg("hl1mov: %s could not read movement code\n", s.name);
 		return false;
 	}
 
@@ -416,19 +597,6 @@ void uninstall(Side &s) {
 	s.gm = nullptr;
 }
 
-void apply_game_vars(bool on) {
-	for (auto &gv : g_game_vars) {
-		if (!gv.var) continue;
-		if (on) {
-			std::strncpy(gv.saved, cvars::root(gv.var)->m_pszString ? cvars::root(gv.var)->m_pszString : "", sizeof(gv.saved) - 1);
-			cvars::set(gv.var, gv.value);
-		} else if (gv.saved[0]) {
-			cvars::set(gv.var, gv.saved);
-		}
-	}
-	g_applied = on;
-}
-
 }
 
 bool init(CreateInterfaceFn engine_factory, CreateInterfaceFn server_factory) {
@@ -443,12 +611,11 @@ bool init(CreateInterfaceFn engine_factory, CreateInterfaceFn server_factory) {
 	hl1_maxspeed = cvars::create("hl1_maxspeed", "320", "Player max speed.", true, 0);
 	hl1_inputspeed = cvars::create("hl1_inputspeed", "400", "Movement key speed (cl_forwardspeed/sidespeed/backspeed in HL1), 0 keeps Portal 2's.", true, 0);
 	hl1_stayonground = cvars::create("hl1_stayonground", "0", "Keep Source's ground snapping on slopes and stairs.", true, 0, true, 1);
+	hl1_debug = cvars::create("hl1_debug", "0", "Print hook activity once a second.", true, 0, true, 1);
 
-	sv_friction = cvars::find("sv_friction");
 	cl_forwardspeed = cvars::find("cl_forwardspeed");
 	cl_backspeed = cvars::find("cl_backspeed");
 	cl_sidespeed = cvars::find("cl_sidespeed");
-	for (auto &gv : g_game_vars) gv.var = cvars::find(gv.name);
 
 	auto client_factory = module_factory("client.dll");
 	void *server_dll = server_factory ? server_factory("ServerGameDLL005", nullptr) : nullptr;
@@ -459,26 +626,22 @@ bool init(CreateInterfaceFn engine_factory, CreateInterfaceFn server_factory) {
 		return false;
 	}
 
-	frame();
 	msg("hl1mov: loaded, hl1_movement %d\n", cvars::get_int(hl1_movement));
 	return true;
 }
 
 void frame() {
-	bool want = cvars::get_int(hl1_movement) != 0;
-	if (want != g_applied) return apply_game_vars(want);
-	if (!want) return;
-	for (auto &gv : g_game_vars) {
-		if (!gv.var) continue;
-		const char *cur = cvars::root(gv.var)->m_pszString;
-		if (!cur || std::strcmp(cur, gv.value)) cvars::set(gv.var, gv.value);
+	if (!cvars::get_int(hl1_debug) || ++g_debug_ticks < 60) return;
+	g_debug_ticks = 0;
+	for (auto &s : g_side) {
+		msg("hl1mov: %s air hl1=%d portal=%d jumps=%d gravdir.z=%.2f airspeed=%.1f frametime=%.4f\n", s.name, s.air_hl1, s.air_portal, s.jumps, s.gravity_z, s.air_speed, s.globals ? frametime(s) : -1.0f);
+		s.air_hl1 = s.air_portal = s.jumps = 0;
 	}
 }
 
 void shutdown() {
 	uninstall(g_side[0]);
 	uninstall(g_side[1]);
-	if (g_applied) apply_game_vars(false);
 	cvars::shutdown();
 }
 
