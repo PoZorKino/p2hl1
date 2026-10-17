@@ -133,6 +133,7 @@ ConVar *hl1_debug;
 ConVar *hl1_fps;
 ConVar *hl1_jumpbuffer;
 
+ConVar *sv_maxspeed;
 ConVar *cl_forwardspeed;
 ConVar *cl_backspeed;
 ConVar *cl_sidespeed;
@@ -652,6 +653,10 @@ void __fastcall hk_check_parameters(void *gm, void *) {
 	float &up = field<float>(mv, kMvUp);
 	float &ms = field<float>(mv, kMvMaxSpeed);
 
+	float boost = 1.0f;
+	float game_max = cvars::get_float(sv_maxspeed);
+	if (game_max > 0.0f && ms > game_max) boost = ms / game_max;
+
 	float input = cvars::get_float(hl1_inputspeed);
 	if (input > 0.0f) {
 		float fs = cvars::get_float(fwd >= 0.0f ? cl_forwardspeed : cl_backspeed);
@@ -661,7 +666,7 @@ void __fastcall hk_check_parameters(void *gm, void *) {
 	}
 
 	float maxspeed = cvars::get_float(hl1_maxspeed);
-	if (maxspeed <= 0.0f) maxspeed = ms;
+	if (maxspeed <= 0.0f) maxspeed = ms / boost;
 	float spd = std::sqrt(fwd * fwd + side * side + up * up);
 	if (spd > maxspeed) {
 		float ratio = maxspeed / spd;
@@ -670,7 +675,8 @@ void __fastcall hk_check_parameters(void *gm, void *) {
 		up *= ratio;
 	}
 
-	float hl1_fwd = fwd, hl1_side = side, hl1_up = up;
+	maxspeed *= boost;
+	float hl1_fwd = fwd * boost, hl1_side = side * boost, hl1_up = up * boost;
 	call(gm);
 	bool frozen = fwd == 0.0f && side == 0.0f && up == 0.0f;
 	if (!frozen) {
@@ -859,6 +865,7 @@ bool init(CreateInterfaceFn engine_factory, CreateInterfaceFn server_factory) {
 	hl1_jumpbuffer = cvars::create("hl1_jumpbuffer", "2", "Ticks a jump press is remembered before landing. Portal 2 only delivers input every 2 ticks. 0 is strict HL1.", true, 0, true, 8);
 	hl1_fps = cvars::create("hl1_fps", "100", "HL1 frame rate to simulate: each tick is split into frames with interpolated view yaw. 0 runs one frame per tick.", true, 0, true, 1000);
 
+	sv_maxspeed = cvars::find("sv_maxspeed");
 	cl_forwardspeed = cvars::find("cl_forwardspeed");
 	cl_backspeed = cvars::find("cl_backspeed");
 	cl_sidespeed = cvars::find("cl_sidespeed");
