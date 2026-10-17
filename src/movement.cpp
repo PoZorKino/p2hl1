@@ -105,6 +105,10 @@ struct Side {
 	int jump_queue;
 	int ground_frames;
 	int edge_frames;
+	int air_standing;
+	int air_ducked;
+	float air_wish_standing;
+	float air_wish_ducked;
 	int prev_buttons;
 	int hl1_moves;
 	int portal_moves;
@@ -478,10 +482,17 @@ void walk_move(const Side &s, void *gm, const Vec3 &basevel) {
 	}
 }
 
-void air_move(const Side &s, void *gm, const Vec3 &basevel) {
+void air_move(Side &s, void *gm, const Vec3 &basevel) {
 	Vec3 wishdir;
 	float wishspeed;
 	wish(gm, wishdir, wishspeed);
+	if (field<int>(player(gm), s.flags) & FL_DUCKING) {
+		++s.air_ducked;
+		s.air_wish_ducked += wishspeed;
+	} else {
+		++s.air_standing;
+		s.air_wish_standing += wishspeed;
+	}
 	air_accelerate(s, gm, wishdir, wishspeed, kAirAccelerate);
 	velocity(gm) = velocity(gm) + basevel;
 	fly_move(gm);
@@ -838,7 +849,10 @@ void frame() {
 	g_debug_ticks = 0;
 	for (auto &s : g_side) {
 		msg("hl1mov: %s moves hl1=%d portal=%d jumps=%d ground=%d edge=%d speed=%.1f frametime=%.4f\n", s.name, s.hl1_moves, s.portal_moves, s.jumps, s.ground_frames, s.edge_frames, s.speed, s.globals ? frametime(s) : -1.0f);
+		msg("hl1mov: %s air standing=%d wish=%.0f ducked=%d wish=%.0f\n", s.name, s.air_standing, s.air_standing ? s.air_wish_standing / s.air_standing : 0.0f, s.air_ducked, s.air_ducked ? s.air_wish_ducked / s.air_ducked : 0.0f);
 		s.hl1_moves = s.portal_moves = s.jumps = s.ground_frames = s.edge_frames = 0;
+		s.air_standing = s.air_ducked = 0;
+		s.air_wish_standing = s.air_wish_ducked = 0.0f;
 	}
 }
 
