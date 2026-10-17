@@ -627,26 +627,42 @@ void hl1_step(void *gm) {
 
 template <int S>
 void __fastcall hk_check_parameters(void *gm, void *) {
-	if (active(gm)) {
-		void *mv = move(gm);
-		float maxspeed = cvars::get_float(hl1_maxspeed);
-		if (maxspeed > 0.0f) {
-			float &ms = field<float>(mv, kMvMaxSpeed);
-			float &cms = field<float>(mv, kMvClientMaxSpeed);
-			if (ms < maxspeed) ms = maxspeed;
-			if (cms != 0.0f && cms < maxspeed) cms = maxspeed;
-		}
-		float input = cvars::get_float(hl1_inputspeed);
-		if (input > 0.0f) {
-			float &fwd = field<float>(mv, kMvForward);
-			float &side = field<float>(mv, kMvSide);
-			float fs = cvars::get_float(fwd >= 0.0f ? cl_forwardspeed : cl_backspeed);
-			float ss = cvars::get_float(cl_sidespeed);
-			if (fs > 0.0f) fwd *= input / fs;
-			if (ss > 0.0f) side *= input / ss;
-		}
+	auto call = orig<VoidFn>(g_side[S], kCheckParameters);
+	if (!active(gm)) return call(gm);
+
+	void *mv = move(gm);
+	float &fwd = field<float>(mv, kMvForward);
+	float &side = field<float>(mv, kMvSide);
+	float &up = field<float>(mv, kMvUp);
+	float &ms = field<float>(mv, kMvMaxSpeed);
+
+	float input = cvars::get_float(hl1_inputspeed);
+	if (input > 0.0f) {
+		float fs = cvars::get_float(fwd >= 0.0f ? cl_forwardspeed : cl_backspeed);
+		float ss = cvars::get_float(cl_sidespeed);
+		if (fs > 0.0f) fwd *= input / fs;
+		if (ss > 0.0f) side *= input / ss;
 	}
-	orig<VoidFn>(g_side[S], kCheckParameters)(gm);
+
+	float maxspeed = cvars::get_float(hl1_maxspeed);
+	if (maxspeed <= 0.0f) maxspeed = ms;
+	float spd = std::sqrt(fwd * fwd + side * side + up * up);
+	if (spd > maxspeed) {
+		float ratio = maxspeed / spd;
+		fwd *= ratio;
+		side *= ratio;
+		up *= ratio;
+	}
+
+	float hl1_fwd = fwd, hl1_side = side, hl1_up = up;
+	call(gm);
+	bool frozen = fwd == 0.0f && side == 0.0f && up == 0.0f;
+	if (!frozen) {
+		fwd = hl1_fwd;
+		side = hl1_side;
+		up = hl1_up;
+	}
+	ms = maxspeed;
 }
 
 template <int S>
